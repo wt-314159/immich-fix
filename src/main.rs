@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use exif::{DateTime, In, Tag, Value};
+use exif::{DateTime, Exif, In, Tag, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -256,6 +256,9 @@ fn cmd_fix(
     let (album_id, album_size) = get_album_id_and_size(client, album_id, album_name)?;
     let asset_details = get_asset_details(client, &album_id, album_size)?;
 
+    let first = asset_details.first().unwrap();
+    get_original_timestamp(container_prefix, host_prefix, first)?;
+    return Ok(());
     let mut success = 0;
     for asset in asset_details.iter() {
         if let Ok(original_timestamp) = get_original_timestamp(container_prefix, host_prefix, asset)
@@ -382,17 +385,17 @@ fn get_original_timestamp(
         let exif = exifreader.read_from_container(&mut bufreader)?;
 
         match exif.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
-            Some(time) => match time.value {
-                Value::Ascii(ref vec) => {
-                    if !vec.is_empty() {
-                        if let Ok(datetime) = DateTime::from_ascii(&vec[0]) {
-                            return Ok(datetime);
-                        }
-                    }
-                    bail!("no value for DateTimeOriginal")
+            Some(time)
+                if let Value::Ascii(ref vec) = time.value
+                    && !vec.is_empty() =>
+            {
+                if let Ok(datetime) = DateTime::from_ascii(&vec[0]) {
+                    let offset = get_offset(&exif);
+                    return Ok(datetime);
                 }
-                _ => bail!("unsupported value type for DateTimeOriginal"),
-            },
+                bail!("no value for DateTimeOriginal")
+            }
+            Some(_) => bail!("unsupported value type for DateTimeOriginal"),
             None => bail!("no DateTimeOriginal field found"),
         }
     } else {
@@ -402,4 +405,19 @@ fn get_original_timestamp(
         );
         bail!("no file found");
     }
+}
+
+fn get_offset(exif: &Exif) -> Option<i64> {
+    match exif.get_field(Tag::OffsetTimeOriginal, In::PRIMARY) {
+        Some(f) => {
+            println!("{:?}", f);
+            if let Value::Ascii(ref vec) = f.value
+                && !vec.is_empty()
+            {
+                println!("is ASCII");
+            }
+        }
+        None => (),
+    };
+    None
 }
