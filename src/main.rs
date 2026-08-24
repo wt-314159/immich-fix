@@ -258,12 +258,18 @@ fn cmd_fix(
 
     let mut success = 0;
     for asset in asset_details.iter() {
-        let original_timestamp = get_original_timestamp(container_prefix, host_prefix, asset)?;
-
-        if !apply {
-            println!("Would update timestamp here to: {:?}", original_timestamp);
+        if let Ok(original_timestamp) = get_original_timestamp(container_prefix, host_prefix, asset)
+        {
+            if !apply {
+                println!("Would update timestamp here to: {:?}", original_timestamp);
+            }
+            success += 1;
+        } else {
+            println!(
+                "Failed to get timestamp for {} - {}",
+                asset.original_filename, asset.original_path
+            );
         }
-        success += 1;
     }
 
     println!(
@@ -369,8 +375,7 @@ fn get_original_timestamp(
 
     let actual_path = Path::new(&host_path);
     if actual_path.exists() {
-        // TODO actually get timestamp here
-        println!("Found file for {} - {}", asset.original_filename, host_path);
+        // println!("Found file for {} - {}", asset.original_filename, host_path);
         let file = File::open(&actual_path)?;
         let mut bufreader = BufReader::new(&file);
         let exifreader = exif::Reader::new();
