@@ -1,3 +1,4 @@
+use log::{debug, error, info, trace, warn};
 use std::{
     fs::{self, File},
     io::BufReader,
@@ -5,12 +6,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use chrono::{FixedOffset, TimeZone};
+use chrono::{FixedOffset, Local, TimeZone};
 use clap::{Parser, Subcommand};
 use exif::{DateTime, Exif, In, Tag, Value};
 use serde::{Deserialize, Serialize};
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "immich-fix", verbatim_doc_comment)]
 struct Cli {
     #[arg(long, env = "IMMICH_URL")]
@@ -22,11 +23,14 @@ struct Cli {
     #[arg(long, default_value = "manifest.json")]
     manifest: PathBuf,
 
+    #[arg(long, default_value = "info")]
+    log_level: log::LevelFilter,
+
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Command {
     /// Read every asset in an album and record its id/path/tags. Read-only
     List {
@@ -127,13 +131,14 @@ impl Client {
 
     #[allow(dead_code)]
     fn get(&self, path: &str) -> Result<reqwest::blocking::Response> {
-        self.http
+        let request = self
+            .http
             .get(format!("{}/{path}", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("Accept", "application/json")
-            .query(&[("name", "")])
-            .send()
-            .context("request failed")
+            .query(&[("name", "")]);
+        debug!("request: {:?}", request);
+        request.send().context("request failed")
     }
 
     fn get_query<T: Serialize + ?Sized>(
@@ -141,45 +146,52 @@ impl Client {
         path: &str,
         query: &T,
     ) -> Result<reqwest::blocking::Response> {
-        self.http
+        let request = self
+            .http
             .get(format!("{}/{path}", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("Accept", "application/json")
-            .query(query)
-            .send()
-            .context("request failed")
+            .query(query);
+        debug!("request: {:?}", request);
+        request.send().context("request failed")
     }
 
     fn post(&self, path: &str, body: &serde_json::Value) -> Result<reqwest::blocking::Response> {
-        self.http
+        let request = self
+            .http
             .post(format!("{}/{path}", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .json(body)
-            .send()
-            .context("request failed")
+            .json(body);
+        debug!("request: {:?}", request);
+        request.send().context("request failed")
     }
 
     #[allow(dead_code)]
     fn put(&self, path: &str, body: &serde_json::Value) -> Result<reqwest::blocking::Response> {
-        self.http
+        let request = self
+            .http
             .put(format!("{}/{path}", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .json(body)
-            .send()
-            .context("request failed")
+            .json(body);
+        debug!("request: {:?}", request);
+        request.send().context("request failed")
     }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let log_file = setup_logging(cli.log_level)?;
+    println!("Log file: {}", log_file);
+    info!("Logging started, parsed CLI: {:?}", cli);
+
     let manifest_path = cli.manifest.clone();
     let client = Client::new(cli.url.trim_end_matches('/').to_string(), cli.api_key);
 
-    match cli.command {
+    let result = match cli.command {
         Command::List {
             album_id,
             album_name,
@@ -203,7 +215,12 @@ fn main() -> Result<()> {
             &container_prefix,
             &host_prefix,
         ),
-    }
+    };
+
+    println!("Logged to {}", log_file);
+    result.inspect_err(|e| error!("{e}"))?;
+
+    Ok(())
 }
 
 // ---- list ------------------------------------------------------------------
@@ -214,6 +231,7 @@ fn cmd_list(
     album_name: Option<&str>,
     manifest_path: &Path,
 ) -> Result<()> {
+    info!("Listing assets for album_id={album_id:?} album_name={album_name:?}");
     if album_id.is_none() && album_name.is_none() {
         bail!("either album_id or album_name must be provided");
     }
@@ -223,6 +241,10 @@ fn cmd_list(
 
     let mut records = Vec::new();
     for detail in asset_details {
+        debug!(
+            "Adding asset id={} original_path={}",
+            detail.id, detail.original_path
+        );
         records.push(AssetRecord {
             id: detail.id,
             original_path: detail.original_path,
@@ -230,6 +252,11 @@ fn cmd_list(
     }
 
     let manifest = Manifest { assets: records };
+    info!(
+        "Writing manifest with {} assets to {}",
+        manifest.assets.len(),
+        manifest_path.display()
+    );
     fs::write(manifest_path, serde_json::to_string_pretty(&manifest)?)
         .context("failed to write manifest")?;
     println!(
@@ -250,6 +277,7 @@ fn cmd_fix(
     container_prefix: &str,
     host_prefix: &str,
 ) -> anyhow::Result<()> {
+    info!("fix album_id={album_id:?} album_name={album_name:?}");
     if album_id.is_none() && album_name.is_none() {
         anyhow::bail!("must provide either album_id or album_name");
     }
@@ -259,35 +287,42 @@ fn cmd_fix(
 
     let mut success = 0;
     for asset in asset_details.iter() {
-        if let Ok((original_timestamp, offset)) =
-            get_original_timestamp(container_prefix, host_prefix, asset)
-        {
-            let timestamp_string = get_datetime_string(original_timestamp, offset);
-            let json = serde_json::json!({ "dateTimeOriginal": timestamp_string });
+        match get_original_timestamp(container_prefix, host_prefix, asset) {
+            Ok((original_timestamp, offset)) => {
+                let timestamp_string = get_datetime_string(original_timestamp, offset);
+                let json = serde_json::json!({ "dateTimeOriginal": timestamp_string });
 
-            if !apply {
-                println!("Would update timestamp here to: {}", timestamp_string);
+                info!(
+                    "Updating timestamp for {} to {} - Filepath: {}",
+                    asset.original_filename, timestamp_string, asset.original_path
+                );
+
+                if !apply {
+                    println!("Would update timestamp here to: {}", timestamp_string);
+                    continue;
+                }
+
+                match client.put(&format!("assets/{}", asset.id), &json) {
+                    Ok(_) => success += 1,
+                    Err(e) => warn!(
+                        "Failed to update timestamp for {} - {}. Error: {}",
+                        asset.original_filename, asset.original_path, e
+                    ),
+                }
             }
-
-            let result = client.put(&format!("assets/{}", asset.id), &json);
-            if result.is_ok() {
-                success += 1;
-            } else {
-                println!(
-                    "!! Failed to update timestamp for {} - {} \nError: {}",
-                    asset.original_filename,
-                    asset.original_path,
-                    result.err().unwrap()
+            Err(e) => {
+                warn!(
+                    "Failed to get timestamp for {} - {}. Error: {}",
+                    asset.original_filename, asset.original_path, e
                 );
             }
-        } else {
-            println!(
-                "Failed to get timestamp for {} - {}",
-                asset.original_filename, asset.original_path
-            );
         }
     }
-
+    info!(
+        "Successfully updated {}/{} assets",
+        success,
+        asset_details.len()
+    );
     println!(
         "Successfully updated [{}/{}] assets",
         success,
@@ -299,6 +334,33 @@ fn cmd_fix(
 
 // ---- helper methods --------------------------------------------------------
 
+fn setup_logging(log_level: log::LevelFilter) -> Result<String> {
+    let log_file = format!(
+        "{}_immich_fix.log",
+        Local::now().format("%Y-%m-%d_%H-%M-%S")
+    );
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{} {} {}] {}",
+                Local::now().to_rfc3339(),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        .level(log_level)
+        .chain(
+            fern::Dispatch::new()
+                // output logs at or above warn to stderr
+                .level(log::LevelFilter::Warn)
+                .chain(std::io::stderr()),
+        )
+        .chain(fern::log_file(log_file.clone())?)
+        .apply()?;
+    Ok(log_file)
+}
+
 fn get_album_id_and_size(
     client: &Client,
     album_id: Option<&str>,
@@ -309,6 +371,7 @@ fn get_album_id_and_size(
     match album_id {
         Some(id) => Ok((id.to_string(), size)),
         None => {
+            info!("fetching album by name: album_name={album_name:?}");
             let name = album_name
                 .ok_or_else(|| anyhow::anyhow!("must provide either album_id or album_name"))?;
             let resp = client.get_query(&format!("albums"), &[("name", name)])?;
@@ -319,11 +382,7 @@ fn get_album_id_and_size(
                     resp.text().unwrap_or_default()
                 );
             }
-            println!("{:?}", resp);
-            // println!(
-            //     "{}",
-            //     resp.text().unwrap_or("failed to unwrap text".to_string())
-            // );
+            debug!("fetched album: {:?}", resp);
             let albums: Vec<AlbumResponse> = resp.json()?;
             if albums.is_empty() {
                 bail!("no albums found");
@@ -334,6 +393,8 @@ fn get_album_id_and_size(
             let album = &albums[0];
             fetched_album_id = album.id.clone();
             size = album.asset_count as usize;
+
+            info!("fetched album: id={fetched_album_id:?} size={size:?}");
             Ok((fetched_album_id, size))
         }
     }
@@ -355,14 +416,15 @@ fn get_asset_details(
     }
 
     let album: AlbumSearchResponse = resp.json().context("unexpected album response shape")?;
-    println!(
-        "Album has {} assets. Fetching details for each...",
+    info!(
+        "album: {} has {} assets",
+        album_id,
         album.assets.items.len()
     );
 
     if album.assets.items.len() != size {
-        println!(
-            "Warning: fetched {} assets, expected {}",
+        warn!(
+            "Fetched {} assets, expected {} (likely a pagination issue).",
             album.assets.items.len(),
             size
         );
@@ -391,7 +453,7 @@ fn get_original_timestamp(
 
     let actual_path = Path::new(&host_path);
     if actual_path.exists() {
-        // println!("Found file for {} - {}", asset.original_filename, host_path);
+        debug!("Found file for {} - {}", asset.original_filename, host_path);
         let file = File::open(&actual_path)?;
         let mut bufreader = BufReader::new(&file);
         let exifreader = exif::Reader::new();
@@ -404,6 +466,7 @@ fn get_original_timestamp(
             {
                 if let Ok(datetime) = DateTime::from_ascii(&vec[0]) {
                     let offset = get_offset(&exif);
+                    debug!("Found timestamp: {} offset: {:?}", datetime, offset);
                     return Ok((datetime, offset));
                 }
                 bail!("no value for DateTimeOriginal")
@@ -412,10 +475,6 @@ fn get_original_timestamp(
             None => bail!("no DateTimeOriginal field found"),
         }
     } else {
-        println!(
-            " !! No file found for {}, filepath: {}",
-            asset.original_filename, host_path
-        );
         bail!("no file found");
     }
 }
@@ -471,12 +530,26 @@ fn get_offset(exif: &Exif) -> Option<Offset> {
             if let Value::Ascii(ref vec) = f.value
                 && !vec.is_empty()
             {
-                return parse_offset(&vec[0]).ok();
+                match parse_offset(&vec[0]) {
+                    Ok(result) => {
+                        debug!("Parsed offset: {:?}", result);
+                        Some(result)
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to parse offset '{:?}', Error: {:?}",
+                            str::from_utf8(&vec[0]).unwrap_or("Not valid UTF-8"),
+                            err
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
             }
         }
-        None => (),
-    };
-    None
+        None => None,
+    }
 }
 
 fn parse_offset(data: &[u8]) -> Result<Offset> {
