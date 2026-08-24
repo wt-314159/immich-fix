@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::{FixedOffset, TimeZone};
 use clap::{Parser, Subcommand};
 use exif::{DateTime, Exif, In, Tag, Value};
 use serde::{Deserialize, Serialize};
@@ -256,15 +257,14 @@ fn cmd_fix(
     let (album_id, album_size) = get_album_id_and_size(client, album_id, album_name)?;
     let asset_details = get_asset_details(client, &album_id, album_size)?;
 
-    let first = asset_details.first().unwrap();
-    get_original_timestamp(container_prefix, host_prefix, first)?;
-    return Ok(());
     let mut success = 0;
     for asset in asset_details.iter() {
-        if let Ok(original_timestamp) = get_original_timestamp(container_prefix, host_prefix, asset)
+        if let Ok((original_timestamp, offset)) =
+            get_original_timestamp(container_prefix, host_prefix, asset)
         {
+            let timestamp_string = get_datetime_string(original_timestamp, offset);
             if !apply {
-                println!("Would update timestamp here to: {:?}", original_timestamp);
+                println!("Would update timestamp here to: {}", timestamp_string);
             }
             success += 1;
         } else {
@@ -407,10 +407,54 @@ fn get_original_timestamp(
     }
 }
 
+fn get_datetime_string(datetime: DateTime, offset: Option<Offset>) -> String {
+    let hour = 3600;
+    if let Some(offset) = offset
+        && offset.hours > 0
+    {
+        if offset.is_negative {
+            FixedOffset::west_opt(offset.hours as i32 * hour)
+                .unwrap()
+                .with_ymd_and_hms(
+                    datetime.year.into(),
+                    datetime.month.into(),
+                    datetime.day.into(),
+                    datetime.hour.into(),
+                    datetime.minute.into(),
+                    datetime.second.into(),
+                )
+                .unwrap()
+                .to_rfc3339()
+        } else {
+            FixedOffset::east_opt(offset.hours as i32 * hour)
+                .unwrap()
+                .with_ymd_and_hms(
+                    datetime.year.into(),
+                    datetime.month.into(),
+                    datetime.day.into(),
+                    datetime.hour.into(),
+                    datetime.minute.into(),
+                    datetime.second.into(),
+                )
+                .unwrap()
+                .to_rfc3339()
+        }
+    } else {
+        format!(
+            "{}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            datetime.year,
+            datetime.month,
+            datetime.day,
+            datetime.hour,
+            datetime.minute,
+            datetime.second,
+        )
+    }
+}
+
 fn get_offset(exif: &Exif) -> Option<Offset> {
     match exif.get_field(Tag::OffsetTimeOriginal, In::PRIMARY) {
         Some(f) => {
-            println!("{:?}", f);
             if let Value::Ascii(ref vec) = f.value
                 && !vec.is_empty()
             {
@@ -487,5 +531,88 @@ mod tests {
         assert!(parse_offset(b"+01:").is_err());
         assert!(parse_offset(b"+01:0").is_err());
         assert!(parse_offset(b"+01:00:").is_err());
+    }
+
+    #[test]
+    fn get_chrono_time() {
+        assert_eq!(
+            get_datetime_string(
+                DateTime {
+                    year: 2026,
+                    month: 2,
+                    day: 3,
+                    hour: 4,
+                    minute: 5,
+                    second: 6,
+                    nanosecond: None,
+                    offset: None,
+                },
+                Some(Offset {
+                    hours: 0,
+                    minutes: 0,
+                    is_negative: false
+                })
+            ),
+            "2026-02-03T04:05:06"
+        );
+
+        assert_eq!(
+            get_datetime_string(
+                DateTime {
+                    year: 2026,
+                    month: 2,
+                    day: 3,
+                    hour: 4,
+                    minute: 5,
+                    second: 6,
+                    nanosecond: None,
+                    offset: None,
+                },
+                None
+            ),
+            "2026-02-03T04:05:06"
+        );
+
+        assert_eq!(
+            get_datetime_string(
+                DateTime {
+                    year: 2026,
+                    month: 2,
+                    day: 3,
+                    hour: 4,
+                    minute: 5,
+                    second: 6,
+                    nanosecond: None,
+                    offset: None,
+                },
+                Some(Offset {
+                    hours: 5,
+                    minutes: 0,
+                    is_negative: false
+                })
+            ),
+            "2026-02-03T04:05:06+05:00"
+        );
+
+        assert_eq!(
+            get_datetime_string(
+                DateTime {
+                    year: 2026,
+                    month: 2,
+                    day: 3,
+                    hour: 4,
+                    minute: 5,
+                    second: 6,
+                    nanosecond: None,
+                    offset: None,
+                },
+                Some(Offset {
+                    hours: 5,
+                    minutes: 0,
+                    is_negative: true
+                })
+            ),
+            "2026-02-03T04:05:06-05:00"
+        );
     }
 }
