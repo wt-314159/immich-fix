@@ -370,7 +370,7 @@ fn get_original_timestamp(
     let actual_path = Path::new(&host_path);
     if actual_path.exists() {
         // TODO actually get timestamp here
-        // println!("Found file for {}", asset.original_filename);
+        println!("Found file for {}", asset.original_filename);
         let file = File::open(&actual_path)?;
         let mut bufreader = BufReader::new(&file);
         let exifreader = exif::Reader::new();
