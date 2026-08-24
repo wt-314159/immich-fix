@@ -266,26 +266,20 @@ fn cmd_fix(
             let json = serde_json::json!({ "dateTimeOriginal": timestamp_string });
 
             if !apply {
-                if success == 0 {
-                    let request = client
-                        .http
-                        .put(format!("{}/assets/{}", client.base_url, asset.id))
-                        .header("x-api-key", &client.api_key)
-                        .header("Content-Type", "application/json")
-                        .header("Accept", "application/json")
-                        .json(&json)
-                        .build()
-                        .ok();
-                    if let Some(request) = request {
-                        println!("\nexample request: {:?}", request);
-                        println!("\nrequest body: {:?}", request.body().unwrap());
-                    }
-                    return Ok(());
-                }
-
                 println!("Would update timestamp here to: {}", timestamp_string);
             }
-            success += 1;
+
+            let result = client.put(&format!("assets/{}", asset.id), &json);
+            if result.is_ok() {
+                success += 1;
+            } else {
+                println!(
+                    "!! Failed to update timestamp for {} - {} \nError: {}",
+                    asset.original_filename,
+                    asset.original_path,
+                    result.err().unwrap()
+                );
+            }
         } else {
             println!(
                 "Failed to get timestamp for {} - {}",
