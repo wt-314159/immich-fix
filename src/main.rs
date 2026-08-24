@@ -277,7 +277,8 @@ fn cmd_fix(
                         .build()
                         .ok();
                     if let Some(request) = request {
-                        println!("example request: {:?}", request);
+                        println!("\nexample request: {:?}", request);
+                        println!("\nrequest body: {:?}", request.body().unwrap());
                     }
                     return Ok(());
                 }
