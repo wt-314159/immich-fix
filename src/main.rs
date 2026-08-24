@@ -256,22 +256,21 @@ fn cmd_fix(
     let (album_id, album_size) = get_album_id_and_size(client, album_id, album_name)?;
     let asset_details = get_asset_details(client, &album_id, album_size)?;
 
-    let first = asset_details.iter().next();
-    if first.is_none() {
-        anyhow::bail!("no assets found");
-    }
-    let first = first.unwrap();
-    get_original_timestamp(container_prefix, host_prefix, first)?;
-    // for asset in asset_details.iter() {
-    //     get_original_timestamp(container_prefix, host_prefix, asset)?;
+    let mut success = 0;
+    for asset in asset_details.iter() {
+        let original_timestamp = get_original_timestamp(container_prefix, host_prefix, asset)?;
 
-    //     if !apply {
-    //         println!(
-    //             "Would update timestamp here to: {}",
-    //             "Some actual timestamp - todo!"
-    //         );
-    //     }
-    // }
+        if !apply {
+            println!("Would update timestamp here to: {:?}", original_timestamp);
+        }
+        success += 1;
+    }
+
+    println!(
+        "Successfully updated [{}/{}] assets",
+        success,
+        asset_details.len()
+    );
 
     Ok(())
 }
@@ -376,20 +375,12 @@ fn get_original_timestamp(
         let mut bufreader = BufReader::new(&file);
         let exifreader = exif::Reader::new();
         let exif = exifreader.read_from_container(&mut bufreader)?;
-        for f in exif.fields() {
-            println!(
-                "{} {} {}",
-                f.tag,
-                f.ifd_num,
-                f.display_value().with_unit(&exif)
-            );
-        }
+
         match exif.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
             Some(time) => match time.value {
                 Value::Ascii(ref vec) => {
                     if !vec.is_empty() {
                         if let Ok(datetime) = DateTime::from_ascii(&vec[0]) {
-                            println!("DateTimeOriginal: {}", datetime);
                             return Ok(datetime);
                         }
                     }
