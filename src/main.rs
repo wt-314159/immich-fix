@@ -1,10 +1,12 @@
 use std::{
-    fs,
+    fs::{self, File},
+    io::BufReader,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use exif::{DateTime, In, Tag, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -254,16 +256,22 @@ fn cmd_fix(
     let (album_id, album_size) = get_album_id_and_size(client, album_id, album_name)?;
     let asset_details = get_asset_details(client, &album_id, album_size)?;
 
-    for asset in asset_details.iter() {
-        get_original_timestamp(container_prefix, host_prefix, asset)?;
-
-        if !apply {
-            println!(
-                "Would update timestamp here to: {}",
-                "Some actual timestamp - todo!"
-            );
-        }
+    let first = asset_details.iter().next();
+    if first.is_none() {
+        anyhow::bail!("no assets found");
     }
+    let first = first.unwrap();
+    get_original_timestamp(container_prefix, host_prefix, first)?;
+    // for asset in asset_details.iter() {
+    //     get_original_timestamp(container_prefix, host_prefix, asset)?;
+
+    //     if !apply {
+    //         println!(
+    //             "Would update timestamp here to: {}",
+    //             "Some actual timestamp - todo!"
+    //         );
+    //     }
+    // }
 
     Ok(())
 }
@@ -346,7 +354,7 @@ fn get_original_timestamp(
     container_prefix: &str,
     host_prefix: &str,
     asset: &AssetDetail,
-) -> Result<()> {
+) -> Result<DateTime> {
     if !asset.original_path.starts_with(container_prefix) {
         bail!(
             " !! {} doesn't start with the given container prefix, original_path: {}",
@@ -358,19 +366,44 @@ fn get_original_timestamp(
     let host_path = asset
         .original_path
         .replacen(container_prefix, host_prefix, 1);
-    let sidecar = format!("{host_path}.xmp");
+    // let sidecar = format!("{host_path}.xmp");
 
-    if Path::new(&host_path).exists() {
-        println!("Found file for {}", asset.original_filename);
+    let actual_path = Path::new(&host_path);
+    if actual_path.exists() {
+        // TODO actually get timestamp here
+        // println!("Found file for {}", asset.original_filename);
+        let file = File::open(&actual_path)?;
+        let mut bufreader = BufReader::new(&file);
+        let exifreader = exif::Reader::new();
+        let exif = exifreader.read_from_container(&mut bufreader)?;
+        for f in exif.fields() {
+            println!(
+                "{} {} {}",
+                f.tag,
+                f.ifd_num,
+                f.display_value().with_unit(&exif)
+            );
+        }
+        match exif.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
+            Some(time) => match time.value {
+                Value::Ascii(ref vec) => {
+                    if !vec.is_empty() {
+                        if let Ok(datetime) = DateTime::from_ascii(&vec[0]) {
+                            println!("DateTimeOriginal: {}", datetime);
+                            return Ok(datetime);
+                        }
+                    }
+                    bail!("no value for DateTimeOriginal")
+                }
+                _ => bail!("unsupported value type for DateTimeOriginal"),
+            },
+            None => bail!("no DateTimeOriginal field found"),
+        }
     } else {
         println!(
             " !! No file found for {}, filepath: {}",
             asset.original_filename, host_path
         );
+        bail!("no file found");
     }
-    if PathBuf::from(sidecar).exists() {
-        println!("Found sidecar for {}", asset.original_filename);
-    }
-
-    Ok(())
 }
