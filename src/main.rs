@@ -263,7 +263,25 @@ fn cmd_fix(
             get_original_timestamp(container_prefix, host_prefix, asset)
         {
             let timestamp_string = get_datetime_string(original_timestamp, offset);
+            let json = serde_json::json!({ "dateTimeOriginal": timestamp_string });
+
             if !apply {
+                if success == 0 {
+                    let request = client
+                        .http
+                        .put(format!("{}/assets/{}", client.base_url, asset.id))
+                        .header("x-api-key", &client.api_key)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .json(&json)
+                        .build()
+                        .ok();
+                    if let Some(request) = request {
+                        println!("example request: {:?}", request);
+                    }
+                    return Ok(());
+                }
+
                 println!("Would update timestamp here to: {}", timestamp_string);
             }
             success += 1;
