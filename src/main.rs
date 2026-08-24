@@ -362,7 +362,7 @@ fn get_original_timestamp(
     container_prefix: &str,
     host_prefix: &str,
     asset: &AssetDetail,
-) -> Result<DateTime> {
+) -> Result<(DateTime, Option<Offset>)> {
     if !asset.original_path.starts_with(container_prefix) {
         bail!(
             " !! {} doesn't start with the given container prefix, original_path: {}",
@@ -391,7 +391,7 @@ fn get_original_timestamp(
             {
                 if let Ok(datetime) = DateTime::from_ascii(&vec[0]) {
                     let offset = get_offset(&exif);
-                    return Ok(datetime);
+                    return Ok((datetime, offset));
                 }
                 bail!("no value for DateTimeOriginal")
             }
@@ -407,17 +407,85 @@ fn get_original_timestamp(
     }
 }
 
-fn get_offset(exif: &Exif) -> Option<i64> {
+fn get_offset(exif: &Exif) -> Option<Offset> {
     match exif.get_field(Tag::OffsetTimeOriginal, In::PRIMARY) {
         Some(f) => {
             println!("{:?}", f);
             if let Value::Ascii(ref vec) = f.value
                 && !vec.is_empty()
             {
-                println!("is ASCII");
+                return parse_offset(&vec[0]).ok();
             }
         }
         None => (),
     };
     None
+}
+
+fn parse_offset(data: &[u8]) -> Result<Offset> {
+    if data.is_empty() || data == b"   :  " {
+        bail!("offset is empty or invalid");
+    }
+
+    let is_negative = data[0] == b'-';
+    let num_start = match data {
+        [b'-', ..] | [b'+', ..] => 1,
+        _ => 0,
+    };
+
+    if data.len() - num_start != 5 {
+        bail!(
+            "offset length is invalid, length {}, numstart {}",
+            data.len(),
+            num_start
+        );
+    }
+
+    let hours: usize = str::from_utf8(&data[num_start..num_start + 2])?.parse()?;
+    let minutes: usize = str::from_utf8(&data[num_start + 3..num_start + 5])?.parse()?;
+
+    Ok(Offset {
+        hours,
+        minutes,
+        is_negative,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Offset {
+    hours: usize,
+    minutes: usize,
+    is_negative: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_offset() {
+        assert_eq!(
+            parse_offset(b"+01:00").unwrap(),
+            Offset {
+                hours: 1,
+                minutes: 0,
+                is_negative: false,
+            }
+        );
+        assert_eq!(
+            parse_offset(b"-02:30").unwrap(),
+            Offset {
+                hours: 2,
+                minutes: 30,
+                is_negative: true,
+            }
+        );
+        assert!(parse_offset(b"").is_err());
+        assert!(parse_offset(b"+").is_err());
+        assert!(parse_offset(b"+0").is_err());
+        assert!(parse_offset(b"+01").is_err());
+        assert!(parse_offset(b"+01:").is_err());
+        assert!(parse_offset(b"+01:0").is_err());
+        assert!(parse_offset(b"+01:00:").is_err());
+    }
 }
