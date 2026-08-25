@@ -43,7 +43,7 @@ enum Command {
         album_name: Option<String>,
     },
     /// Fix the original timestamp of each asset in the given album
-    Fix {
+    FixTimestamps {
         /// The temporary album's UUID, from the Immich UI URL
         #[arg(long)]
         album_id: Option<String>,
@@ -57,6 +57,21 @@ enum Command {
         #[arg(long)]
         host_prefix: String,
         /// Actually change the timestamp
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Set the timezone for the given album
+    SetTimezone {
+        /// The temporary album's UUID, from the Immich UI URL
+        #[arg(long)]
+        album_id: Option<String>,
+        /// The temporary album's name
+        #[arg(long)]
+        album_name: Option<String>,
+        /// Path prefix as it appears in Immich's `originalPath`        /// The timezone to set
+        #[arg(long)]
+        timezone: String,
+        /// Actually change the timezone
         #[arg(long)]
         apply: bool,
     },
@@ -111,6 +126,16 @@ struct AssetDetail {
     original_path: String,
     #[serde(rename = "originalFileName")]
     original_filename: String,
+    #[serde(rename = "exifInfo")]
+    exif_info: Option<ExifInfo>,
+}
+
+#[derive(Deserialize)]
+struct ExifInfo {
+    #[serde(rename = "dateTimeOriginal")]
+    date_time_original: Option<String>,
+    #[serde(rename = "timeZone")]
+    time_zone: Option<String>,
 }
 
 // ---- thin HTTP client ------------------------------------------------------
@@ -202,7 +227,7 @@ fn main() -> Result<()> {
             album_name.as_deref(),
             &manifest_path,
         ),
-        Command::Fix {
+        Command::FixTimestamps {
             album_id,
             album_name,
             apply,
@@ -215,6 +240,18 @@ fn main() -> Result<()> {
             apply,
             &container_prefix,
             &host_prefix,
+        ),
+        Command::SetTimezone {
+            album_id,
+            album_name,
+            timezone,
+            apply,
+        } => set_timezone(
+            &client,
+            album_id.as_deref(),
+            album_name.as_deref(),
+            &timezone,
+            apply,
         ),
     };
 
@@ -278,7 +315,7 @@ fn cmd_fix(
     container_prefix: &str,
     host_prefix: &str,
 ) -> anyhow::Result<()> {
-    info!("fix album_id={album_id:?} album_name={album_name:?}");
+    info!("fix-timestamps album_id={album_id:?} album_name={album_name:?}");
     if album_id.is_none() && album_name.is_none() {
         anyhow::bail!("must provide either album_id or album_name");
     }
@@ -330,6 +367,156 @@ fn cmd_fix(
         asset_details.len()
     );
 
+    Ok(())
+}
+
+// ---- set timezone ----------------------------------------------------------
+
+fn set_timezone(
+    client: &Client,
+    album_id: Option<&str>,
+    album_name: Option<&str>,
+    timezone: &str,
+    apply: bool,
+) -> Result<()> {
+    info!("set-timezone - album_id={album_id:?} album_name={album_name:?}, timezone={timezone:?}");
+    if album_id.is_none() && album_name.is_none() {
+        bail!("must provide either album_id or album_name");
+    }
+
+    let timezone = timezone.trim_matches(&['"', '\'']);
+    if !timezone.starts_with("UTC") {
+        bail!("timezone must be UTC");
+    } else if timezone.len() < 5 || (!timezone[3..4].eq("+") && !timezone[3..4].eq("-")) {
+        bail!("timezone must be UTC+ or UTC- (actual timezone: {timezone:?})",);
+    }
+
+    let abs_offset = timezone[4..]
+        .parse::<i32>()
+        .context("invalid timezone offset")?;
+    let new_offset = format!("{}{abs_offset:02}:00", &timezone[3..4]);
+    debug!("new_offset: {}", new_offset);
+
+    let (album_id, album_size) = get_album_id_and_size(client, album_id, album_name)?;
+    let asset_details = get_asset_details(client, &album_id, album_size)?;
+
+    let mut changed = 0;
+    for asset in &asset_details {
+        match client.get(&format!("assets/{}", asset.id)) {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    warn!(
+                        "failed to get asset {} - {} Response: {:?}",
+                        asset.id, asset.original_filename, response
+                    );
+                    continue;
+                }
+
+                if let Ok(details) = response
+                    .json::<AssetDetail>()
+                    .context("Unexpected response shape")
+                {
+                    if details.exif_info.is_none() {
+                        warn!(
+                            "asset {} - {} has no exif info",
+                            asset.id, asset.original_filename
+                        );
+                        continue;
+                    }
+                    let exif_info = details.exif_info.unwrap();
+
+                    if exif_info.date_time_original.is_none() {
+                        warn!(
+                            "asset {} - {} has no dateTimeOriginal",
+                            asset.id, asset.original_filename
+                        );
+                        continue;
+                    }
+
+                    if exif_info.time_zone.is_none() {
+                        warn!(
+                            "asset {} - {} has no timeZone",
+                            asset.id, asset.original_filename
+                        );
+                        continue;
+                    }
+
+                    let date_time = exif_info.date_time_original.as_ref().unwrap();
+                    let curr_timezone = exif_info.time_zone.as_ref().unwrap();
+
+                    if !curr_timezone.starts_with("UTC") {
+                        warn!(
+                            "asset {} - {} has non-UTC timezone: {}",
+                            asset.id, asset.original_filename, curr_timezone
+                        );
+                        continue;
+                    }
+
+                    debug!(
+                        "asset {} - {} has originalTime: {} and timezone: {:?}",
+                        asset.id, asset.original_filename, date_time, curr_timezone
+                    );
+
+                    if curr_timezone == timezone {
+                        debug!("Asset {} already has correct timezone, skipping", asset.id);
+                        continue;
+                    }
+
+                    let date_time_trim = match date_time.matches(':').count() {
+                        2 => date_time,
+                        3 => &date_time[0..date_time.len() - 6],
+                        _ => {
+                            warn!(
+                                "Failed to parse date_time for asset {} - {}",
+                                asset.id, asset.original_filename
+                            );
+                            continue;
+                        }
+                    };
+
+                    let new_datetime = format!("{date_time_trim}{new_offset}");
+
+                    if !apply {
+                        debug!(
+                            "Would have changed datetime from {} to {} for asset {} - {}",
+                            date_time, new_datetime, asset.id, asset.original_filename
+                        );
+                        continue;
+                    }
+                    debug!(
+                        "Changing datetime from {} to {} for asset {} - {}",
+                        date_time, new_datetime, asset.id, asset.original_filename
+                    );
+
+                    let json = serde_json::json!({ "dateTimeOriginal": new_datetime});
+                    let response = client.put(&format!("assets/{}", details.id), &json);
+                    if response.is_ok() {
+                        changed += 1;
+                    } else {
+                        warn!(
+                            "Failed to update datetime for asset {} - {}",
+                            asset.id, asset.original_filename
+                        );
+                    }
+                } else {
+                    warn!(
+                        "Failed to parse response for asset {} - {}",
+                        asset.id, asset.original_filename
+                    );
+                    continue;
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "failed to get asset {} - {} Error: {}",
+                    asset.id, asset.original_filename, e
+                );
+            }
+        }
+    }
+
+    info!("Successfully changed {} assets", changed);
+    println!("Successfully changed {} assets", changed);
     Ok(())
 }
 
